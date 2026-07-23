@@ -333,4 +333,9 @@ export {
   IGNORE_FILENAMES,
 }
 
-export default OpenCodeAgentIgnorePlugin
+// V1 plugin format expected by OpenCode:
+// export default { id?: string, server: Plugin }
+export default {
+  id: "opencode-agentignore",
+  server: OpenCodeAgentIgnorePlugin,
+}
