@@ -1,6 +1,6 @@
 {
   "name": "opencode-ignore",
-  "version": "0.1.0",
+  "version": "1.2.0",
   "description": "OpenCode plugin that blocks reads/edits on files matching .agentignore / .claudeignore (gitignore syntax)",
   "license": "MIT",
   "author": "Stefano Verna",
