@@ -9,13 +9,16 @@
     "url": "git+https://github.com/stefanoverna/opencode-agentignore.git"
   },
   "type": "module",
-  "main": "src/index.ts",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
   "files": [
-    "src",
+    "dist",
     "README.md",
     "LICENSE"
   ],
   "scripts": {
+    "build": "tsc",
+    "prepublishOnly": "npm run build",
     "test": "vitest run"
   },
   "keywords": [
@@ -31,6 +34,8 @@
   },
   "devDependencies": {
     "@opencode-ai/plugin": "^0.15.0",
+    "@types/node": "^26.1.1",
+    "np": "^12.0.0",
     "typescript": "^5.7.0",
     "vitest": "^3.0.0"
   },
