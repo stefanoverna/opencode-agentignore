@@ -1,0 +1,22 @@
+{
+  "name": "opencode-ignore",
+  "version": "0.1.0",
+  "description": "OpenCode plugin that blocks reads/edits on files matching .agentignore / .claudeignore (gitignore syntax)",
+  "license": "MIT",
+  "author": "Stefano Verna",
+  "repository": "github:stefanoverna/opencode-ignore",
+  "type": "module",
+  "main": "src/index.ts",
+  "files": ["src"],
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "claudeignore",
+    "agentignore",
+    "ignore",
+    "security"
+  ],
+  "peerDependencies": {
+    "@opencode-ai/plugin": "*"
+  }
+}
