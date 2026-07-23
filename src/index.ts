@@ -332,3 +332,5 @@ export {
   stringifyResponse,
   IGNORE_FILENAMES,
 }
+
+export default OpenCodeAgentIgnorePlugin
