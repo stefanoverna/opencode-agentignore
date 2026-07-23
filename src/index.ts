@@ -1,170 +1,55 @@
 /**
- * opencode-ignore — OpenCode plugin
+ * opencode-agentignore
  *
- * Blocks tool calls targeting files matched by .claudeignore (gitignore syntax).
- * Walks up from the target file's directory to find all .claudeignore files.
+ * OpenCode plugin that blocks tool calls targeting files matched by
+ * .agentignore / .claudeignore (gitignore syntax).
+ *
+ * Walks up from the target file's directory to find all ignore files,
+ * merging patterns from co-located .agentignore + .claudeignore at each level.
+ * Uses the battle-tested `ignore` npm package for pattern matching.
  * Also post-filters Grep responses to prevent content leaks from protected files.
- *
- * In OpenCode this is a plugin using tool.execute.before / tool.execute.after
- * instead of Claude Code's settings.json PreToolUse / PostToolUse hooks.
  */
 
 import { existsSync, readFileSync, statSync } from "node:fs"
 import { resolve, relative, dirname, sep, isAbsolute, join } from "node:path"
 import { realpathSync } from "node:fs"
+import ignore from "ignore"
 import type { Plugin } from "@opencode-ai/plugin"
 
-// ── gitignore-style pattern matching ────────────────────────────────────────
-
-type Pattern = {
-  regex: RegExp
-  negate: boolean
-  dirOnly: boolean
-}
-
-/**
- * Translate a gitignore pattern body into a regex string.
- * Returns [regexBody, anchored].
- */
-function translate(pattern: string): [string, boolean] {
-  // A pattern is anchored if it contains "/" anywhere except as a trailing "/".
-  const anchored = pattern.slice(0, -1).includes("/") || pattern.startsWith("/")
-  if (pattern.startsWith("/")) pattern = pattern.slice(1)
-
-  let out = ""
-  let i = 0
-  const n = pattern.length
-
-  while (i < n) {
-    const c = pattern[i]
-    if (c === "*") {
-      if (i + 1 < n && pattern[i + 1] === "*") {
-        if (i + 2 < n && pattern[i + 2] === "/") {
-          if (i === 0) {
-            out += "(?:.*/)?"
-            i += 3
-            continue
-          } else {
-            out += "(?:.*/)?"
-            i += 3
-            continue
-          }
-        } else if (i + 2 === n) {
-          out += ".*"
-          i += 2
-          continue
-        } else {
-          out += "[^/]*"
-          i += 2
-          continue
-        }
-      } else {
-        out += "[^/]*"
-        i += 1
-        continue
-      }
-    } else if (c === "?") {
-      out += "[^/]"
-      i += 1
-    } else if (c === "[") {
-      // Character class
-      let j = i + 1
-      if (j < n && pattern[j] === "!") j++
-      if (j < n && pattern[j] === "]") j++
-      while (j < n && pattern[j] !== "]") j++
-      if (j >= n) {
-        out += escapeRegex(c)
-        i += 1
-      } else {
-        let cls = pattern.slice(i + 1, j)
-        if (cls.startsWith("!")) cls = "^" + cls.slice(1)
-        out += "[" + cls + "]"
-        i = j + 1
-      }
-    } else if (c === "/") {
-      out += "/"
-      i += 1
-    } else {
-      out += escapeRegex(c)
-      i += 1
-    }
-  }
-
-  return [out, anchored]
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
-}
-
-function compile(pattern: string): Pattern | null {
-  pattern = pattern.trimEnd()
-  if (!pattern || pattern.startsWith("#")) return null
-
-  let negate = false
-  if (pattern.startsWith("!")) {
-    negate = true
-    pattern = pattern.slice(1)
-  }
-
-  let dirOnly = false
-  if (pattern.endsWith("/")) {
-    dirOnly = true
-    pattern = pattern.slice(0, -1)
-  }
-
-  if (!pattern) return null
-
-  const [body, anchored] = translate(pattern)
-  let regex: RegExp
-  if (anchored) {
-    regex = new RegExp("^" + body + "$")
-  } else {
-    regex = new RegExp("(?:^|/)" + body + "$")
-  }
-  return { regex, negate, dirOnly }
-}
-
-class GitignoreMatcher {
-  patterns: Pattern[] = []
-
-  add(lines: string[]): void {
-    for (const raw of lines) {
-      const p = compile(raw)
-      if (p) this.patterns.push(p)
-    }
-  }
-
-  private matchOne(path: string, isDir: boolean): boolean {
-    let ignored = false
-    for (const p of this.patterns) {
-      if (p.dirOnly && !isDir) continue
-      if (p.regex.test(path)) {
-        ignored = !p.negate
-      }
-    }
-    return ignored
-  }
-
-  /** Returns true if `path` (or any ancestor dir) is ignored. */
-  matches(path: string, isDir = false): boolean {
-    const parts = path.split("/")
-    // Check each ancestor directory first, then the path itself
-    for (let i = 1; i < parts.length; i++) {
-      if (this.matchOne(parts.slice(0, i).join("/"), true)) return true
-    }
-    return this.matchOne(path, isDir)
-  }
-}
-
-// ── .claudeignore file discovery ────────────────────────────────────────────
-
-function realpathSafe(p: string): string {
-  try { return realpathSync(p) } catch { return p }
-}
+// ── Constants ───────────────────────────────────────────────────────────────
 
 /** Ignore files we look for at each directory level (checked in order). */
 const IGNORE_FILENAMES = [".agentignore", ".claudeignore"]
+
+/** Service name used in log messages. */
+const SERVICE = "opencode-agentignore"
+
+/** Tool names whose target paths we block pre-execution. */
+const BLOCKED_TOOLS = new Set([
+  "read",
+  "edit",
+  "write",
+  "glob",
+  "grep",
+  "multiedit",
+  "list",
+])
+
+// ── Helpers ─────────────────────────────────────────────────────────────────
+
+function realpathSafe(p: string): string {
+  try {
+    return realpathSync(p)
+  } catch {
+    return p
+  }
+}
+
+function getFilePath(args: Record<string, unknown> | undefined): string | null {
+  if (!args) return null
+  const p = (args.filePath ?? args.file_path ?? args.path) as string | undefined
+  return typeof p === "string" && p.trim() ? p : null
+}
 
 /**
  * Walk up from `start` to `/`, collecting every ignore file along the way.
@@ -189,73 +74,65 @@ function findIgnoreFiles(start: string): string[] {
 }
 
 /**
- * Check whether `path` is blocked by any ignore file in the hierarchy.
- * Returns [ignoreFile, reason] if blocked, or null if allowed.
+ * Check whether `targetPath` should be blocked by any ignore file in the
+ * hierarchy. Returns [ignoreFile, reason] if blocked, or null if allowed.
  *
- * Walks up from `path`'s parent (or path itself if it's a dir).
+ * Walks up from `targetPath`'s parent (or the path itself if it's a dir).
  * At each directory level, patterns from all co-located ignore files
- * (.agentignore + .claudeignore) are merged and evaluated together.
- * Any match blocks. Corrupt/unreadable files fail closed.
+ * (.agentignore + .claudeignore) are merged into a single `ignore` instance
+ * and evaluated against the relative path. Any match blocks.
+ *
+ * Corrupt/unreadable files fail closed (block).
  */
 function findIgnoreMatch(targetPath: string): [string, string] | null {
+  // Resolve symlinks to canonical paths (macOS /tmp → /private/tmp)
+  const resolved = realpathSafe(targetPath)
+
   let isDir: boolean
   try {
-    isDir = statSync(targetPath).isDirectory()
+    isDir = statSync(resolved).isDirectory()
   } catch {
     isDir = false
   }
 
-  const start = isDir ? targetPath : dirname(targetPath)
+  const start = isDir ? resolved : dirname(resolved)
   const ignoreFiles = findIgnoreFiles(start)
 
   for (const ignoreFile of ignoreFiles) {
-    const base = dirname(ignoreFile)
-    let rel: string
-    try {
-      rel = relative(base, targetPath)
-    } catch {
-      continue
-    }
-    if (!rel || rel === ".") continue
-    // Normalize to forward slashes
-    const relNorm = rel.split(sep).join("/")
+    // Canonicalize the ignore file's directory too
+    const base = realpathSafe(dirname(ignoreFile))
+    if (!resolved.startsWith(base + sep)) continue
+
+    // Compute relative path from this ignore file's directory to the target
+    let relNorm = resolved.slice(base.length + 1)
+    if (!relNorm) continue
+
+    // Normalize to forward slashes (required by `ignore` library)
+    relNorm = relNorm.split(sep).join("/")
+    // Strip `./` prefix
+    if (relNorm.startsWith("./")) relNorm = relNorm.slice(2)
+    // Directories need trailing slash for proper matching
+    if (isDir && !relNorm.endsWith("/")) relNorm += "/"
 
     // Merge patterns from all ignore files at this directory level
-    const matcher = new GitignoreMatcher()
+    const ig = ignore()
     for (const name of IGNORE_FILENAMES) {
       const sibling = join(base, name)
       if (!existsSync(sibling)) continue
       try {
-        matcher.add(readFileSync(sibling, "utf-8").split("\n"))
+        ig.add(readFileSync(sibling, "utf-8"))
       } catch (e) {
         // Corrupt/unreadable — fail closed
         return [sibling, `cannot read ${sibling}: ${String(e)}`]
       }
     }
 
-    if (matcher.matches(relNorm, isDir)) {
+    if (ig.ignores(relNorm)) {
       const basename = ignoreFile.split(sep).pop()!
       return [ignoreFile, `matched ${basename} in ${base}`]
     }
   }
   return null
-}
-
-// ── Tool names we intercept ─────────────────────────────────────────────────
-
-const BLOCKED_TOOLS = new Set([
-  "read",
-  "edit",
-  "write",
-  "glob",
-  "grep",
-  "multiedit",
-])
-
-function getFilePath(args: Record<string, unknown> | undefined): string | null {
-  if (!args) return null
-  const p = (args.filePath ?? args.file_path ?? args.path) as string | undefined
-  return typeof p === "string" && p.trim() ? p : null
 }
 
 // ── Grep response post-filtering ────────────────────────────────────────────
@@ -275,12 +152,9 @@ const GREP_PATH_SEP = /[:-]\d+(?:[:-]|$)/
  *     Line 10: content
  *     Line 20: content
  *
- *   /another/file.ts:
- *     Line 5: content
- *
  * File header lines are absolute paths ending with ":".
  */
-const OPENCODE_GREP_FILE_HEADER = /^([/][^:\n]+):\s*$/
+const OPENCODE_GREP_FILE_HEADER = /^(\/[^:\n]+):\s*$/
 
 function stringifyResponse(toolResponse: unknown): string {
   if (typeof toolResponse === "string") return toolResponse
@@ -316,9 +190,10 @@ function extractPathCandidates(text: string): Set<string> {
         hadMatch = true
       }
     }
-    // If no separator was found, the whole line might be a path
-    // (e.g. ripgrep files-with-matches mode). Only add if it looks like a path.
-    if (!hadMatch && (trimmed.includes("/") || trimmed.includes("\\"))) {
+    // Fallback: treat the whole line as a path candidate. This handles
+    // files-with-matches mode (plain filenames per line), and summary
+    // lines like "Found N matches" get filtered later by existsSync().
+    if (!hadMatch) {
       candidates.add(trimmed)
     }
   }
@@ -327,18 +202,21 @@ function extractPathCandidates(text: string): Set<string> {
 
 // ── Plugin ──────────────────────────────────────────────────────────────────
 
-export const OpenCodeIgnorePlugin: Plugin = async ({ client, directory }) => {
+export const OpenCodeAgentIgnorePlugin: Plugin = async ({ client, directory }) => {
   return {
     /** PreToolUse equivalent: block reads/edits on ignored files */
     "tool.execute.before": async (input, output) => {
-      const tool = input.tool
+      const tool = (input as { tool: string }).tool
       if (!BLOCKED_TOOLS.has(tool)) return
 
       const args =
         (input as unknown as { args?: Record<string, unknown> }).args ??
-        output.args
+        (output as { args?: Record<string, unknown> } | undefined)?.args
       const target = getFilePath(args as Record<string, unknown>)
       if (!target) return
+
+      // Always allow project root to prevent blocking entire project
+      if (target === ".") return
 
       // Resolve relative to current directory
       const resolved = isAbsolute(target)
@@ -355,9 +233,9 @@ export const OpenCodeIgnorePlugin: Plugin = async ({ client, directory }) => {
       const match = findIgnoreMatch(realPath)
       if (match) {
         const [, reason] = match
-        const msg = `opencode-ignore: blocked ${tool} of ${target} (${reason})`
+        const msg = `${SERVICE}: blocked ${tool} of ${target} (${reason})`
         await client.app.log({
-          body: { service: "opencode-ignore", level: "warn", message: msg },
+          body: { service: SERVICE, level: "warn", message: msg },
         })
         throw new Error(msg)
       }
@@ -368,18 +246,7 @@ export const OpenCodeIgnorePlugin: Plugin = async ({ client, directory }) => {
       const tool = (input as { tool: string }).tool
       if (!tool || tool.toLowerCase() !== "grep") return
 
-      // Log for debugging — remove once confirmed working
-      await client.app.log({
-        body: {
-          service: "opencode-ignore",
-          level: "debug",
-          message: `grep post-filter fired (tool="${tool}", output keys: ${Object.keys(output || {}).join(", ")})`,
-        },
-      })
-
-      // Extract the grep response text from the output. The output shape varies:
-      //   { output: "...", title: "...", metadata: ... }  — standard
-      //   "..."  — plain string (defensive fallback)
+      // Extract the grep response text from the output
       const raw: unknown =
         typeof output === "string"
           ? output
@@ -395,7 +262,9 @@ export const OpenCodeIgnorePlugin: Plugin = async ({ client, directory }) => {
       if (searchPath) {
         try {
           const r = realpathSync(
-            isAbsolute(searchPath) ? searchPath : join(directory, searchPath),
+            isAbsolute(searchPath)
+              ? searchPath
+              : join(directory, searchPath),
           )
           root = statSync(r).isDirectory() ? r : dirname(r)
         } catch {
@@ -431,15 +300,16 @@ export const OpenCodeIgnorePlugin: Plugin = async ({ client, directory }) => {
           .sort()
           .map((p) => relative(root, p))
           .join(", ")
-        const more = blocked.length > 3 ? ` (+${blocked.length - 3} more)` : ""
+        const more =
+          blocked.length > 3 ? ` (+${blocked.length - 3} more)` : ""
         const reason =
-          `opencode-ignore: Grep response references protected files: ` +
+          `${SERVICE}: Grep response references protected files: ` +
           `${sample}${more}. Re-run with a narrower \`path\` ` +
           `or \`glob\` exclusion (e.g. "!.env") to avoid these files.`
 
         await client.app.log({
           body: {
-            service: "opencode-ignore",
+            service: SERVICE,
             level: "warn",
             message: reason,
           },
@@ -452,4 +322,13 @@ export const OpenCodeIgnorePlugin: Plugin = async ({ client, directory }) => {
       }
     },
   }
+}
+
+// Exported for testing
+export {
+  findIgnoreFiles,
+  findIgnoreMatch,
+  extractPathCandidates,
+  stringifyResponse,
+  IGNORE_FILENAMES,
 }

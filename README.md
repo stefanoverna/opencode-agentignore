@@ -1,7 +1,9 @@
-# opencode-ignore
+# opencode-agentignore
 
 OpenCode plugin that blocks reads, edits, writes, globs, and greps on files
-matching `.agentignore` / `.claudeignore` (gitignore syntax).
+matching `.agentignore` / `.claudeignore` (gitignore syntax). Uses the
+battle-tested [`ignore`](https://github.com/kaelzhang/node-ignore) library
+for pattern matching.
 
 Ported from [claude-ignore](https://github.com/stefanoverna/claude-ignore).
 
@@ -9,17 +11,18 @@ Ported from [claude-ignore](https://github.com/stefanoverna/claude-ignore).
 
 Two hooks run together:
 
-- **`tool.execute.before`** on `read|edit|write|glob|grep|multiedit`. Walks up
+- **`tool.execute.before`** on `read|edit|write|glob|grep|multiedit|list`. Walks up
   from the target file's parent to `/`, collecting every `.agentignore` and
   `.claudeignore` along the way. Patterns from co-located files are merged
-  at each directory level. If *any* level matches the (symlink-resolved) path,
-  the call is denied.
+  at each directory level using the `ignore` library. If *any* level matches
+  the (symlink-resolved) path, the call is denied.
 - **`tool.execute.after`** on `grep`. Re-inspects the response after ripgrep
   runs. Grep's `tool.execute.before` only sees the search root, so a project-
   wide search could return match lines from protected files. This hook
   extracts each path in the response, checks it against the same ignore chain,
   and replaces the result with a block message — the original content is
-  never shown to the model.
+  never shown to the model. Supports both ripgrep raw output and OpenCode
+  native grep format.
 
 ## Install
 
@@ -28,7 +31,7 @@ Add to your OpenCode config (`~/.config/opencode/opencode.json` or
 
 ```json
 {
-  "plugin": ["opencode-ignore@latest"]
+  "plugin": ["opencode-agentignore@latest"]
 }
 ```
 
@@ -65,8 +68,8 @@ or `.claudeignore` for compatibility with claude-ignore / Claude Code.
 - **Walk-up starts from the target file**, not the cwd — rules apply
   regardless of where OpenCode was launched.
 - **Fail-closed across files.** A leaf-level `!pattern` cannot re-include
-  a file ignored higher up. Negation still works *within* a single ignore
-  file. Unreadable/corrupt ignore files also fail closed.
+  a file ignored higher up. Unreadable/corrupt ignore files also fail
+  closed. However, negations *within* a single ignore file work normally.
 - **`Glob` results aren't filtered.** The model can still learn that a
   protected file *exists* (e.g. `Glob("**/.env")` returns paths). Only
   `Grep` is post-filtered, since it can leak file *contents*.
@@ -76,6 +79,16 @@ or `.claudeignore` for compatibility with claude-ignore / Claude Code.
 ## Configuration
 
 The plugin requires no configuration. Drop the ignore files and it works.
+
+## Testing
+
+```bash
+npm test
+```
+
+38 tests covering the `ignore` library integration, hierarchical
+lookup, block/allow matching, symlink handling, merged `.agentignore` +
+`.claudeignore`, and grep post-filter extraction.
 
 ## License
 

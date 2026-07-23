@@ -1,15 +1,23 @@
 {
-  "name": "opencode-ignore",
+  "name": "opencode-agentignore",
   "version": "1.2.0",
   "description": "OpenCode plugin that blocks reads/edits on files matching .agentignore / .claudeignore (gitignore syntax)",
   "license": "MIT",
   "author": "Stefano Verna",
-  "repository": "github:stefanoverna/opencode-ignore",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/stefanoverna/opencode-agentignore.git"
+  },
   "type": "module",
   "main": "src/index.ts",
   "files": [
-    "src"
+    "src",
+    "README.md",
+    "LICENSE"
   ],
+  "scripts": {
+    "test": "vitest run"
+  },
   "keywords": [
     "opencode",
     "opencode-plugin",
@@ -22,6 +30,11 @@
     "@opencode-ai/plugin": "*"
   },
   "devDependencies": {
-    "np": "^12.0.0"
+    "@opencode-ai/plugin": "^0.15.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "ignore": "^7.0.6"
   }
 }
