@@ -7,7 +7,9 @@
   "repository": "github:stefanoverna/opencode-ignore",
   "type": "module",
   "main": "src/index.ts",
-  "files": ["src"],
+  "files": [
+    "src"
+  ],
   "keywords": [
     "opencode",
     "opencode-plugin",
@@ -18,5 +20,8 @@
   ],
   "peerDependencies": {
     "@opencode-ai/plugin": "*"
+  },
+  "devDependencies": {
+    "np": "^12.0.0"
   }
 }
